@@ -1,3 +1,5 @@
+<p align="center"><img src="https://raw.githubusercontent.com/go-filesystems/brand/main/social/go-filesystems-cab.png" alt="go-filesystems/cab" width="720"></p>
+
 # cab
 
 A pure-Go reader for the **Microsoft Cabinet** (`.cab`) format, presenting a
