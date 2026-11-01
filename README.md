@@ -144,6 +144,26 @@ containing the offset and reads at most one block it does not need.
 a caller serving small requests is `ReadFile`, which holds the whole member in
 memory. `ReadAt` is safe to call concurrently, as `io.ReaderAt` requires.
 
+## Untrusted input
+
+A cabinet is read as hostile. Every count that sizes an allocation is proved to fit
+in the file *before* the allocation, and every loop is bounded. Each row was
+measured on the code before the fix (`TotalAlloc` or wall time around the call):
+
+| What the file controls | Before | Bound now |
+|---|---|---|
+| folders (`cFolders`, 16 bits) | 65 535 × 80 bytes allocated from a 36-byte header | must fit in the bytes left (`ErrTruncated`) |
+| blocks, all folders together | 2 000 folders sharing one chain of 2 000 blocks, 32 054-byte cabinet: 130 MB retained (65 535 × 65 535 is 103 GB from 1 MiB) | at most `len / 8` blocks in total (`ErrCorrupt`) |
+| an MSZIP block's `cbUncomp` | 512 KB of empty blocks declared a 2 GiB folder | at most 1032 × the DEFLATE bytes (RFC 1951: a match is ≤ 258 bytes and costs ≥ 2 bits) |
+| `ReadFile` of an entry | 65 MB claimed over a 16 KB cabinet: 65 549 624 bytes allocated first | `MaxReadFileSize` = 1 GiB (`ErrTooLarge`; `OpenFile` has none); the buffer grows 16 MiB at a time with the bytes that come out |
+| files in one directory | 65 535 files, 1.6 MB: 3.08 s (`appendOnce` scan) | linear; nothing is looked up |
+| directories implied by paths | 20 000 files 124 deep each, 5.4 MB: 968 732 496 bytes | files and directories together ≤ `MaxEntries` = 256 Ki, four per file at the 65 535-file limit (`ErrTooLarge`) |
+
+⚠ A *legitimate* cabinet can expand: an MSZIP entry may be 1032× its stored bytes, so
+`ReadFile` of a small cabinet can still return up to a gigabyte. Use `OpenFile` for
+anything whose size you did not choose. `FuzzOpen` ran 100 s (twice) without a
+finding; it also fails any input on which `Open` takes more than 2 s.
+
 ## Names
 
 A `CFFILE` name is NUL-terminated and uses **backslash** as its separator; this

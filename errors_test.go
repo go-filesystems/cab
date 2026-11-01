@@ -244,8 +244,14 @@ func TestBlockLevelCorruption(t *testing.T) {
 		{
 			name: "MSZIP block too short to hold CK",
 			c: craft{
-				folders: []cFolder{{typeC: uint16(CompressionMSZIP), blocks: []cBlock{{data: []byte("C"), cbUncomp: u16(5)}}}},
-				files:   []cFile{{size: 5, name: []byte("a")}},
+				// A block of one byte cannot yield output (parse refuses a claim of any:
+				// see TestABlockCannotYieldMoreThanDeflateCanPack), so it has to be an
+				// empty one, ahead of a block that gives the entry its bytes.
+				folders: []cFolder{{typeC: uint16(CompressionMSZIP), blocks: []cBlock{
+					{data: []byte("C"), cbUncomp: u16(0)},
+					{data: []byte("CKx"), cbUncomp: u16(5)},
+				}}},
+				files: []cFile{{size: 5, name: []byte("a")}},
 			},
 			want: ErrCorrupt, says: `"CK" signature`,
 		},
@@ -320,6 +326,13 @@ func TestIOFailureIsReportedAsItself(t *testing.T) {
 	r2 := failAt{r: bytes.NewReader(b), from: 8, err: boom}
 	if _, err := Open(r2, int64(len(b))); !errors.Is(err, boom) {
 		t.Errorf("Open with a failing header read = %v", err)
+	}
+	// And a failure while the folder table is being read: the header is whole, the
+	// first CFFOLDER is not. (Truncation there is refused earlier now, by proving the
+	// folders fit before allocating them; this is the I/O case that remains.)
+	r4 := failAt{r: bytes.NewReader(b), from: hdrFixedSize, err: boom}
+	if _, err := Open(r4, int64(len(b))); !errors.Is(err, boom) {
+		t.Errorf("Open with a failing folder read = %v", err)
 	}
 	// And a failure while a NAME is being read.
 	pb := fixture(t, fxPaths)
