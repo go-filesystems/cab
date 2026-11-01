@@ -23,7 +23,33 @@ const (
 	dataFixedSize   = 8     // CFDATA: csum, cbData, cbUncomp
 	maxBlockUncomp  = 32768 // cbUncomp ceiling, and the MSZIP history size
 	maxNameLen      = 255   // longest NUL-terminated name this reader accepts
+
+	// maxInflateRatio is the most output one byte of DEFLATE can produce. A match
+	// is at most 258 bytes (RFC 1951, 3.2.5: length code 285 is 258) and every
+	// code is at least one bit (3.2.1: code lengths are 0-15, a used code has at
+	// least 1), so a length and a distance cost at least two bits for at most 258
+	// bytes: 129 bytes a bit, 1032 a byte. A block that declares more than this
+	// cannot be inflated, whatever its bytes are.
+	maxInflateRatio = 1032
 )
+
+// MaxEntries bounds the paths a cabinet may register, files and the directories
+// they imply together. A cabinet holds at most 65 535 files (cFiles is 16 bits) but
+// every path can imply up to 127 directories of its own, so the index of a cabinet
+// of 17 MB can reach eight million entries; this is the ceiling on that.
+//
+// 262 144 is four per file at the 65 535-file limit: the file and three directories
+// of its own, far more than a real cabinet needs. An entry costs about 430 bytes
+// once indexed (measured), so the index is bounded near 110 MB.
+const MaxEntries = 1 << 18
+
+// MaxReadFileSize bounds what ReadFile will return. OpenFile has no such limit: it
+// reads nothing until asked. 1 GiB also keeps the buffer inside an int on a 32-bit
+// target.
+const MaxReadFileSize = 1 << 30
+
+// maxEntries is MaxEntries as a variable only so that a test can lower it.
+var maxEntries = MaxEntries
 
 // CFHEADER flags.
 const (
@@ -242,6 +268,19 @@ func parse(r io.ReaderAt, size int64) (*FS, error) {
 	if cFolders == 0 {
 		return nil, fmt.Errorf("cab: cFolders is 0, so no file can be reached: %w", ErrCorrupt)
 	}
+	// ⛔ Every count below sizes an allocation, so each is proved to fit in the
+	// cabinet BEFORE it is made. cFolders is 16 bits, but a folder is 80 bytes of
+	// memory and 8 of file: 65 535 of them are 5 MB from a 36-byte header.
+	if int64(cFolders)*int64(folderFixedSize+cbCFFolder) > c.limit-c.off {
+		return nil, fmt.Errorf("cab: %d folders of %d bytes cannot fit in the %d bytes left: %w",
+			cFolders, folderFixedSize+cbCFFolder, c.limit-c.off, ErrTruncated)
+	}
+	// Likewise the blocks of ALL the folders together: each takes dataFixedSize
+	// plus the reserve in the file, and blocks of different folders are different
+	// bytes. Without this, folders may all point their chains at one real chain:
+	// measured, 2 000 folders of 2 000 blocks over a 32 054-byte cabinet retained
+	// 130 MB, and 65 535 of 65 535 is 103 GB from a 1 MiB file.
+	blocksLeft := c.limit / int64(dataFixedSize+cbCFData)
 	f.folders = make([]folder, cFolders)
 	for i := range f.folders {
 		b := c.read(folderFixedSize + cbCFFolder)
@@ -258,7 +297,12 @@ func parse(r io.ReaderAt, size int64) (*FS, error) {
 		if err := checkCompression(fol.compress, i); err != nil {
 			return nil, err
 		}
-		if err := scanBlocks(c, fol, i, int64(le32(b[0:])), int(le16(b[4:])), cbCFData); err != nil {
+		count := int(le16(b[4:]))
+		if blocksLeft -= int64(count); blocksLeft < 0 {
+			return nil, fmt.Errorf("cab: folder %d brings the blocks declared so far past what the %d-byte cabinet can hold: %w",
+				i, c.limit, ErrCorrupt)
+		}
+		if err := scanBlocks(c, fol, i, int64(le32(b[0:])), count, cbCFData); err != nil {
 			return nil, err
 		}
 	}
@@ -306,6 +350,15 @@ func scanBlocks(c *cursor, fol *folder, idx int, off int64, count, cbCFData int)
 		}
 		if fol.compress == CompressionNone && blk.cbData != blk.cbUncomp {
 			return fmt.Errorf("cab: folder %d block %d is stored yet holds %d bytes for %d: %w", idx, j, blk.cbData, blk.cbUncomp, ErrCorrupt)
+		}
+		// ⛔ A block cannot yield more than DEFLATE can pack into its bytes ("CK"
+		// is two of them). Without this a block table of cbData 0 and cbUncomp
+		// 32 768 declared a 2 GiB folder from 512 KB, and ReadFile allocated the
+		// declared size before the first block failed to inflate.
+		if fol.compress == CompressionMSZIP &&
+			int64(blk.cbUncomp) > maxInflateRatio*int64(max(int(blk.cbData)-2, 0)) {
+			return fmt.Errorf("cab: folder %d block %d yields %d bytes from %d, more than DEFLATE can pack in: %w",
+				idx, j, blk.cbUncomp, blk.cbData, ErrCorrupt)
 		}
 		if blk.dataOff+int64(blk.cbData) > c.limit {
 			return fmt.Errorf("cab: folder %d block %d holds %d bytes at offset %d, past the end of the %d-byte cabinet: %w", idx, j, blk.cbData, blk.dataOff, c.limit, ErrTruncated)

@@ -4,7 +4,6 @@
 package cab
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -194,13 +193,40 @@ func (f *FS) ReadFile(p string) ([]byte, error) {
 		return nil, err
 	}
 	defer h.Close()
-	buf := make([]byte, h.Size())
-	n, err := h.ReadAt(buf, 0)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, err
+	size := h.Size()
+	// ⛔ The size is the cabinet's claim, and the block table that supports it is
+	// only as true as the DEFLATE underneath. So it is capped, and the buffer
+	// grows with the bytes that actually come out, a step at a time: a claim of
+	// 65 MB over a 16 KB cabinet used to allocate all 65 MB before the first
+	// block failed to inflate. A step is large (16 MiB) so that the files people
+	// really read are one allocation and one read, as before.
+	if size > MaxReadFileSize {
+		return nil, fmt.Errorf("cab: %q is %d bytes, over the %d ceiling of ReadFile (OpenFile has none): %w",
+			p, size, MaxReadFileSize, ErrTooLarge)
 	}
-	return buf[:n], nil
+	var buf []byte
+	for int64(len(buf)) < size {
+		step := int(min(size-int64(len(buf)), readStep))
+		if need := len(buf) + step; need > cap(buf) {
+			// One allocation, doubling but never past the entry's size. (slices.Grow
+			// allocates the step twice under -race.)
+			grown := make([]byte, len(buf), max(need, int(min(2*int64(cap(buf)), size))))
+			copy(grown, buf)
+			buf = grown
+		}
+		n, err := h.ReadAt(buf[len(buf):len(buf)+step], int64(len(buf)))
+		buf = buf[:len(buf)+n]
+		// handle.ReadAt answers io.EOF only for a read that comes up short, and
+		// this one is clipped to the entry, so any error here is a real one.
+		if err != nil {
+			return nil, err
+		}
+	}
+	return buf, nil
 }
+
+// readStep is how much of an entry ReadFile asks the decoder for at a time.
+const readStep = 16 << 20
 
 // OpenFile hands back a random-access handle on one entry, reading none of it.
 func (f *FS) OpenFile(p string) (filesystem.File, error) {
@@ -228,6 +254,18 @@ func (f *FS) Rename(string, string) error                 { return ErrReadOnly }
 // add records one entry, plus every directory above it. A cabinet is a list of
 // paths and not a tree -- it holds no directory entries at all -- so a reader
 // that registers only what it was told cannot list a single directory.
+//
+// ⛔ Two costs here were unbounded, both measured on the old code:
+//
+//   - appendOnce scanned a directory's children before appending, so N files in one
+//     directory cost N²/2 comparisons: 65 535 files (a 1.6 MB cabinet) took 3.08 s.
+//     A child is new at every level it is appended at -- the entry itself, or a
+//     directory created a moment ago -- and the walk stops at the first directory
+//     that already existed, whose own ancestors are filed already. So nothing is
+//     ever appended twice and nothing needs looking up.
+//   - every path implies its own directories, up to 127 a path, none shared when the
+//     first components differ: 20 000 such files (a 5.4 MB cabinet) allocated 968 MB.
+//     Entries, files and directories together, are capped at MaxEntries.
 func (f *FS) add(e *entry) error {
 	if prev, seen := f.byPath[e.path]; seen {
 		if prev.ord < 0 {
@@ -237,27 +275,22 @@ func (f *FS) add(e *entry) error {
 	}
 	f.byPath[e.path] = e
 	child := e.path
-	for parent := path.Dir(child); ; parent = path.Dir(child) {
-		if got, seen := f.byPath[parent]; !seen && parent != "." {
-			f.byPath[parent] = &entry{path: parent, name: path.Base(parent), dir: true, ord: -1}
-		} else if seen && !got.dir {
+	for {
+		if len(f.byPath) > maxEntries {
+			return fmt.Errorf("cab: more than %d paths, counting the directories they imply: %w", maxEntries, ErrTooLarge)
+		}
+		parent := path.Dir(child)
+		got, seen := f.byPath[parent]
+		if seen && !got.dir {
 			return fmt.Errorf("cab: %q is both a file and the parent directory of %q: %w", parent, child, ErrCorrupt)
 		}
-		f.kids[parent] = appendOnce(f.kids[parent], child)
-		if parent == "." {
+		f.kids[parent] = append(f.kids[parent], child)
+		if seen || parent == "." {
 			return nil
 		}
+		f.byPath[parent] = &entry{path: parent, name: path.Base(parent), dir: true, ord: -1}
 		child = parent
 	}
-}
-
-func appendOnce(list []string, s string) []string {
-	for _, e := range list {
-		if e == s {
-			return list
-		}
-	}
-	return append(list, s)
 }
 
 // clean turns a caller's spelling of a path into the one this driver answers

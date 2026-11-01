@@ -44,6 +44,12 @@ var (
 	// contradicts the rest of the file. "This file is broken."
 	ErrCorrupt = errors.New("cab: cabinet is corrupt")
 
+	// ErrTooLarge says the cabinet is well-formed as far as it was read and asks
+	// for more than a ceiling allows: more entries than MaxEntries, or a file
+	// larger than MaxReadFileSize passed to ReadFile (OpenFile has no such
+	// ceiling). "I will not hold this."
+	ErrTooLarge = errors.New("cab: over the size ceiling")
+
 	// ErrReadOnly is returned by every mutating method (WriteFile, MkDir,
 	// DeleteFile, DeleteDir, Rename). A cabinet is a read-only format.
 	ErrReadOnly = errors.New("cab: cabinet is read-only")
