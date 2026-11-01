@@ -276,28 +276,26 @@ func TestReadFileGrowsAcrossSteps(t *testing.T) {
 }
 
 // TestAWideDirectoryIsLinear: filing N files under one directory used to cost N²/2
-// comparisons. The test compares N with 4N and not a number of seconds, so a slow
-// machine does not fail it: linear is about 4x, quadratic about 16x.
+// comparisons (65 535 files took 3.08 s). 200 000 take a few tens of milliseconds
+// now and would take about 30 s with the scan, so a bound of 5 s tells the two apart
+// by a wide margin either way and does not depend on the machine being quick. (A
+// ratio of the times for N and 4N was tried first and was too noisy: 6 or more for
+// linear code, against 16 for quadratic.) The cap on entries is lifted for the test.
 func TestAWideDirectoryIsLinear(t *testing.T) {
-	timeIt := func(n int) time.Duration {
-		best := time.Hour
-		for range 5 {
-			f := &FS{byPath: map[string]*entry{}, kids: map[string][]string{}}
-			d := time.Now()
-			for i := range n {
-				if err := f.add(&entry{path: fmt.Sprintf("d/f%d", i), ord: i}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			best = min(best, time.Since(d))
+	defer func(old int) { maxEntries = old }(maxEntries)
+	const n = 200000
+	maxEntries = 2 * n
+	f := &FS{byPath: map[string]*entry{}, kids: map[string][]string{}}
+	d := time.Now()
+	for i := range n {
+		if err := f.add(&entry{path: fmt.Sprintf("d/f%d", i), ord: i}); err != nil {
+			t.Fatal(err)
 		}
-		return best
 	}
-	small, large := timeIt(20000), timeIt(80000)
-	ratio := float64(large) / float64(small)
-	t.Logf("20 000 files: %v, 80 000: %v, ratio %.1f", small, large, ratio)
-	if ratio > 10 {
-		t.Errorf("4x the files took %.1fx the time: the index is not linear", ratio)
+	took := time.Since(d)
+	t.Logf("%d files in one directory: %v", n, took)
+	if took > 5*time.Second {
+		t.Errorf("%d files took %v: the index is not linear", n, took)
 	}
 }
 
