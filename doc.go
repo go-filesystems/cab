@@ -86,9 +86,19 @@
 // inflating the n bytes before it, because the history window makes no block
 // independently decodable; a handle therefore keeps its decoder and its
 // position, so reading forwards is linear overall while reading BACKWARDS
-// starts a fresh pass from the start of the folder. Under None there is no
+// restarts from the nearest cached decoder state. Under None there is no
 // history, so a handle restarts at the block containing the offset and reads at
 // most one block's worth it does not need.
+//
+// To keep opening many members of one MSZIP folder from being quadratic, the FS
+// shares a bounded cache of decoder states (the 32 KiB history window before
+// every 4th block) between all handles: a handle resumes from the cached state
+// nearest before its offset, so extracting the members in folder order inflates
+// each block about once, plus at most 3 blocks of re-decoding per open. The
+// cache holds at most 128 states (4 MiB) per FS, least recently used evicted,
+// whatever the cabinet declares; opening members in random order over a folder
+// larger than the cache (128*4 blocks = 16 MiB of output) can still
+// re-decode up to the cache spacing times the number of evictions.
 //
 // Opener is implemented anyway, rather than withheld, because the alternative
 // for a caller serving 4 KiB requests is ReadFile -- which holds the WHOLE

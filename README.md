@@ -136,8 +136,11 @@ is verified.
 A folder is a **stream**. Under MSZIP, reaching byte *n* means inflating the *n*
 bytes before it, because the history window makes no block independently
 decodable. A handle keeps its decoder and its position, so reading forwards is
-linear overall while reading **backwards** starts a fresh pass from the start of
-the folder. Under None there is no history, so a handle restarts at the block
+linear overall while reading **backwards** resumes from the nearest cached
+decoder state. The FS shares a bounded cache (the 32 KiB history before every 4th
+block, at most 128 states = 4 MiB per FS, LRU) between all handles, so opening
+the members of a folder in order inflates each block about once instead of once
+per member. Under None there is no history, so a handle restarts at the block
 containing the offset and reads at most one block it does not need.
 
 `Opener` is implemented anyway rather than withheld, because the alternative for

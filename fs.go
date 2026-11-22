@@ -32,6 +32,10 @@ type FS struct {
 	folders        []folder
 	byPath         map[string]*entry
 	kids           map[string][]string
+
+	// ckpts caches MSZIP decoder states shared by every handle; see
+	// checkpoints.
+	ckpts checkpoints
 }
 
 // SetID is the cabinet set this file belongs to: every cabinet of one set

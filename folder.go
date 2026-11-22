@@ -47,6 +47,11 @@ func (fr *folderReader) reset(target int64) int64 {
 	// in its folder. So the search always lands on a block that exists.
 	fr.blk, fr.buf, fr.hist = start, nil, nil
 	fr.off = fol.blocks[start].start
+	if fol.compress == CompressionMSZIP {
+		if ck, ok := fr.fs.ckpts.nearest(fr.idx, target); ok {
+			fr.blk, fr.hist, fr.off = ck.blk, ck.hist, ck.off
+		}
+	}
 	return fr.off
 }
 
@@ -70,6 +75,9 @@ func (fr *folderReader) nextBlock() error {
 		return io.EOF
 	}
 	b := fol.blocks[fr.blk]
+	if fol.compress == CompressionMSZIP && fr.blk > 0 && fr.blk%checkpointStride == 0 {
+		fr.fs.ckpts.put(fr.idx, fr.blk, b.start, fr.hist)
+	}
 	raw := make([]byte, b.cbData)
 	if _, err := fr.fs.r.ReadAt(raw, b.dataOff); err != nil {
 		return fmt.Errorf("cab: folder %d block %d: reading %d bytes at offset %d: %w", fr.idx, fr.blk, b.cbData, b.dataOff, err)
