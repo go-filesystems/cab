@@ -6,6 +6,7 @@ package cab
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	iofs "io/fs"
 	"os"
@@ -376,30 +377,35 @@ func TestReadOnly(t *testing.T) {
 func TestErrNotExistContract(t *testing.T) {
 	fs := openFixture(t, fxPaths)
 	miss := "no/such/file"
-	if _, err := fs.ReadFile(miss); !errors.Is(err, iofs.ErrNotExist) {
-		t.Errorf("ReadFile: %v", err)
+	// Each call runs under a recover: a lookup that stopped checking its error
+	// would dereference a nil entry, and that must fail THIS assertion rather
+	// than end the test binary by a panic.
+	for name, call := range map[string]func() error{
+		"ReadFile":    func() error { _, err := fs.ReadFile(miss); return err },
+		"OpenFile":    func() error { _, err := fs.OpenFile(miss); return err },
+		"Stat":        func() error { _, err := fs.Stat(miss); return err },
+		"ListDir":     func() error { _, err := fs.ListDir(miss); return err },
+		"ReadLink":    func() error { _, err := fs.ReadLink(miss); return err },
+		"Compression": func() error { _, err := fs.Compression(miss); return err },
+		"Attributes":  func() error { _, err := fs.Attributes(miss); return err },
+		"ModTime":     func() error { _, err := fs.ModTime(miss); return err },
+	} {
+		if err := callNoPanic(t, name, call); !errors.Is(err, iofs.ErrNotExist) {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
-	if _, err := fs.OpenFile(miss); !errors.Is(err, iofs.ErrNotExist) {
-		t.Errorf("OpenFile: %v", err)
-	}
-	if _, err := fs.Stat(miss); !errors.Is(err, iofs.ErrNotExist) {
-		t.Errorf("Stat: %v", err)
-	}
-	if _, err := fs.ListDir(miss); !errors.Is(err, iofs.ErrNotExist) {
-		t.Errorf("ListDir: %v", err)
-	}
-	if _, err := fs.ReadLink(miss); !errors.Is(err, iofs.ErrNotExist) {
-		t.Errorf("ReadLink: %v", err)
-	}
-	if _, err := fs.Compression(miss); !errors.Is(err, iofs.ErrNotExist) {
-		t.Errorf("Compression: %v", err)
-	}
-	if _, err := fs.Attributes(miss); !errors.Is(err, iofs.ErrNotExist) {
-		t.Errorf("Attributes: %v", err)
-	}
-	if _, err := fs.ModTime(miss); !errors.Is(err, iofs.ErrNotExist) {
-		t.Errorf("ModTime: %v", err)
-	}
+}
+
+// callNoPanic runs call and turns a panic into a returned error, so that an
+// unchecked lookup fails an assertion instead of ending the test binary.
+func callNoPanic(t *testing.T, name string, call func() error) (err error) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%s panicked: %v", name, r)
+		}
+	}()
+	return call()
 }
 
 // TestKindRefusals: a directory is not a regular file, a regular file is not a
